@@ -1,0 +1,15 @@
+tensorflow>=2.12
+opencv-python
+librosa
+matplotlib
+numpy
+pandas
+scikit-learn
+streamlit
+fpdf2
+pillow
+tqdm
+tf-keras-vis
+pydub
+requests
+zipfile36
