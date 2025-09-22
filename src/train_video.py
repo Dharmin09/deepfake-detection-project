@@ -10,7 +10,6 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from tqdm.keras import TqdmCallback
-from tqdm import tqdm
 
 from src.config import VIDEO_MODEL_PATH, MODELS_DIR, IMG_SIZE_VIDEO, SPLITS_DIR
 from src.utils import preprocess_frames_for_xception
@@ -19,6 +18,7 @@ BATCH_SIZE = 8
 EPOCHS = 6
 
 def build_model(num_classes=2, lr=1e-4):
+    # This function is unchanged
     base = Xception(weights='imagenet', include_top=False, pooling='avg',
                     input_shape=(IMG_SIZE_VIDEO[0], IMG_SIZE_VIDEO[1], 3))
     x = base.output
@@ -35,6 +35,7 @@ def build_model(num_classes=2, lr=1e-4):
     return model
 
 def load_split(split_file):
+    # This function is unchanged
     items = []
     with open(split_file, "r") as f:
         for line in f:
@@ -44,6 +45,7 @@ def load_split(split_file):
     return items
 
 def make_generator(items, target_size, batch_size, shuffle=True):
+    # This function is unchanged
     n = len(items)
     while True:
         if shuffle:
@@ -77,24 +79,26 @@ def main():
     model = build_model()
     os.makedirs(MODELS_DIR, exist_ok=True)
 
-    chk = ModelCheckpoint(VIDEO_MODEL_PATH, monitor='val_accuracy', save_best_only=True, verbose=1)
+    chk = ModelCheckpoint(VIDEO_MODEL_PATH, monitor='val_accuracy', save_best_only=True, verbose=0) # Set verbose=0 for cleaner TqdmCallback output
     rlr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, verbose=1)
 
-    # Training with tqdm progress bar
     model.fit(train_gen,
               validation_data=val_gen,
               steps_per_epoch=steps_train,
               validation_steps=steps_val,
               epochs=EPOCHS,
-              callbacks=[chk, rlr, TqdmCallback(verbose=1)])
+              callbacks=[chk, rlr, TqdmCallback(verbose=2)], # Use verbose=2 for epoch/batch bar
+              verbose=0) # Set verbose=0 to let TqdmCallback handle the output
 
-    print("✅ Training finished. Best model saved to:", VIDEO_MODEL_PATH)
+    print("\n✅ Training finished. Best model saved to:", VIDEO_MODEL_PATH)
 
     print("\n🔎 Evaluating on test set...")
-    for _ in tqdm(range(steps_test), desc="Testing", unit="batch"):
-        next(test_gen)
-    loss, acc = model.evaluate(test_gen, steps=steps_test, verbose=0)
-    print(f"Test accuracy: {acc:.4f}")
+    # --- FIX: Removed the buggy for loop that consumed the test generator ---
+    
+    # --- FIX: Changed verbose=0 to verbose=1 to show a correct, built-in progress bar ---
+    loss, acc = model.evaluate(test_gen, steps=steps_test, verbose=1)
+    
+    print(f"\nTest accuracy: {acc:.4f}")
 
 if __name__ == "__main__":
     main()
