@@ -3,31 +3,32 @@
 
 import os
 
-# Detect environment
-if "COLAB_GPU" in os.environ:   # running on Google Colab
-    ROOT = "/content/drive/MyDrive/revealai"
-else:  # local PC
-    ROOT = r"N:\Datasets"   # ✅ project root
+# --- Environment Detection ---
+# This block automatically switches paths based on where the code is running.
+if "COLAB_GPU" in os.environ:
+    # This path is used when running on Google Colab.
+    # CORRECTED to match your Google Drive screenshot.
+    ROOT = "/content/drive/MyDrive/datasets" 
+else:
+    # This path is used when running on your local computer.
+    ROOT = r"N:\Datasets"
 
-DATA_DIR = ROOT  # raw + splits live directly under N:\Datasets
-
-# Raw input folders (put your raw video/audio here)
-VIDEO_RAW = os.path.join(DATA_DIR, "video", "raw")
-AUDIO_RAW = os.path.join(DATA_DIR, "audio", "raw")
-
-# Preprocessed outputs (created by data_prep.py)
-VIDEO_FRAMES = os.path.join(DATA_DIR, "video", "frames")   # frames/real/, frames/fake/
-AUDIO_SPECS = os.path.join(DATA_DIR, "audio", "specs")     # specs/real/, specs/fake/
-
-# Splits
-SPLITS_DIR = os.path.join(DATA_DIR, "splits")
-
-# Models and reports
+# --- Main Data Directories ---
+# These folders contain your raw data, processed data, and results.
+VIDEO_RAW = os.path.join(ROOT, "video", "raw")
+AUDIO_RAW = os.path.join(ROOT, "audio", "raw")
+VIDEO_FRAMES = os.path.join(ROOT, "video", "frames")
+AUDIO_SPECS = os.path.join(ROOT, "audio", "specs")
+SPLITS_DIR = os.path.join(ROOT, "splits")
 MODELS_DIR = os.path.join(ROOT, "models")
-VIDEO_MODEL_PATH = os.path.join(MODELS_DIR, "video_xception.h5")
-AUDIO_MODEL_PATH = os.path.join(MODELS_DIR, "audio_cnn.h5")
 REPORTS_DIR = os.path.join(ROOT, "reports")
 
-# Misc
-IMG_SIZE_VIDEO = (299, 299)   # Xception input
-IMG_SIZE_AUDIO = (224, 224)   # spectrogram image size for audio CNN
+# --- Model Paths ---
+# These are the final output paths for your trained models.
+VIDEO_MODEL_PATH = os.path.join(MODELS_DIR, "video_xception.h5")
+AUDIO_MODEL_PATH = os.path.join(MODELS_DIR, "audio_cnn.h5")
+
+# --- Model Configuration ---
+# These settings must match the input size expected by the models.
+IMG_SIZE_VIDEO = (299, 299)   # Xception input size
+IMG_SIZE_AUDIO = (224, 224)   # Spectrogram image size for the audio CNN
