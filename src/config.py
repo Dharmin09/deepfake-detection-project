@@ -8,7 +8,7 @@ import os
 if "COLAB_GPU" in os.environ:
     # This path is used when running on Google Colab.
     # CORRECTED to match your Google Drive screenshot.
-    ROOT = "/content/drive/MyDrive/datasets" 
+    ROOT = "/content/drive/MyDrive/revealai/datasets" 
 else:
     # This path is used when running on your local computer.
     ROOT = r"N:\Datasets"
