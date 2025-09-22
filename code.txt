@@ -1,0 +1,989 @@
+# src/app_streamlit.py
+import streamlit as st
+import tempfile
+import os
+
+from src.infer import load_models, infer_video, infer_audio, combine_scores
+from src.generate_report import SimpleReport
+from src.config import VIDEO_MODEL_PATH, AUDIO_MODEL_PATH, REPORTS_DIR
+
+st.set_page_config(page_title="RevealAI", layout="wide")
+st.title("RevealAI — Deepfake Detection (Demo)")
+
+uploaded = st.file_uploader("Upload a video (.mp4) or audio (.wav)", type=['mp4', 'wav'])
+
+if uploaded is not None:
+    # Save temp file
+    suffix = os.path.splitext(uploaded.name)[1]
+    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmpf.write(uploaded.read())
+    tmpf.flush()
+    path = tmpf.name
+    st.info(f"Saved temp file: {path}")
+
+    # Load trained models
+    vm, am = load_models(video_path=VIDEO_MODEL_PATH, audio_path=AUDIO_MODEL_PATH)
+
+    res_audio = {}
+    res = {'video_score': 0.0, 'heatmaps': []}
+    audio_score = None
+
+    if uploaded.type == "video/mp4":
+        st.write("🎥 Running video inference...")
+        res = infer_video(path, every_n_frames=15, max_frames=20, heatmap_frames=3)
+        st.write("Video fake score:", round(res['video_score'], 3))
+        for i, img in enumerate(res['heatmaps']):
+            st.image(img, caption=f"Heatmap {i+1}", width=300)
+
+    elif uploaded.type == "audio/wav":
+        st.write("🎙️ Running audio inference...")
+        res_audio = infer_audio(path)
+        st.write("Audio fake score:", round(res_audio['audio_score'], 3))
+        if res_audio['spec_img'] is not None:
+            st.image(res_audio['spec_img'], caption="Spectrogram", width=400)
+        audio_score = res_audio['audio_score']
+
+    # Combine scores
+    final = combine_scores(res['video_score'], audio_score)
+    st.write("🔎 Final combined score:", round(final, 3))
+
+    # PDF report
+    if st.button("📄 Generate PDF report"):
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        out_path = os.path.join(REPORTS_DIR, "revealai_report.pdf")
+        rep = SimpleReport(out_path=out_path)
+        rep.add_cover()
+        rep.add_result(
+            uploaded.name,
+            res['video_score'],
+            audio_score or 0.0,
+            final,
+            res['heatmaps'],
+            res_audio.get('spec_img')
+        )
+        pdf_path = rep.output()
+        with open(pdf_path, "rb") as f:
+            st.download_button("⬇️ Download report", f, file_name="revealai_report.pdf")
+
+
+# src/config.py
+# Centralized paths and constants used across the project.
+
+import os
+
+# --- Environment Detection ---
+# This block automatically switches paths based on where the code is running.
+if "COLAB_GPU" in os.environ:
+    # --- Colab Paths ---
+    # Path to the main project folder on Google Drive
+    PROJECT_ROOT = "/content/drive/MyDrive/revealai"
+    # Path to the nested folder containing your datasets
+    DATA_ROOT = os.path.join(PROJECT_ROOT, "datasets")
+else:
+    # --- Local PC Paths ---
+    # On your local machine, everything is under one root folder
+    PROJECT_ROOT = r"N:\Datasets"
+    DATA_ROOT = r"N:\Datasets"
+
+# --- Data Directories (using DATA_ROOT) ---
+# These paths point to your audio, video, and splits folders.
+VIDEO_RAW = os.path.join(DATA_ROOT, "video", "raw")
+AUDIO_RAW = os.path.join(DATA_ROOT, "audio", "raw")
+VIDEO_FRAMES = os.path.join(DATA_ROOT, "video", "frames")
+AUDIO_SPECS = os.path.join(DATA_ROOT, "audio", "specs")
+SPLITS_DIR = os.path.join(DATA_ROOT, "splits")
+
+# --- Asset Directories (using PROJECT_ROOT) ---
+# These paths point to where models and reports will be saved.
+MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
+
+# --- Model Paths ---
+# These are the final output paths for your trained models.
+VIDEO_MODEL_PATH = os.path.join(MODELS_DIR, "video_xception.h5")
+AUDIO_MODEL_PATH = os.path.join(MODELS_DIR, "audio_cnn.h5")
+
+# --- Model Configuration ---
+# These settings must match the input size expected by the models.
+IMG_SIZE_VIDEO = (299, 299)   # Xception input size
+IMG_SIZE_AUDIO = (224, 224)   # Spectrogram image size for the audio CNN
+
+
+
+# sort_asvspoof_auto.py
+# 1. Downloads ffmpeg if not installed
+# 2. Converts ASVspoof FLAC -> WAV
+# 3. Sorts into real/fake folders
+
+import os
+import shutil
+import glob
+import requests
+import zipfile
+from pathlib import Path
+from pydub import AudioSegment
+
+# -------------------------
+# 1. Ensure ffmpeg exists
+# -------------------------
+FFMPEG_DIR = Path("C:/ffmpeg/bin")
+FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
+
+if not FFMPEG_EXE.exists():
+    print("⚡ ffmpeg not found, downloading...")
+    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    zip_path = Path("ffmpeg.zip")
+
+    # Download zip
+    with requests.get(url, stream=True) as r:
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(r.raw, f)
+
+    # Extract
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall("C:/")
+
+    # Find extracted folder (e.g., ffmpeg-6.x-full_build)
+    extracted_dir = next(Path("C:/").glob("ffmpeg-*"))
+    if not FFMPEG_DIR.parent.exists():
+        extracted_dir.rename("C:/ffmpeg")
+    print("✅ ffmpeg installed at C:/ffmpeg/bin")
+
+# Force pydub to use this ffmpeg
+AudioSegment.converter = str(FFMPEG_EXE)
+
+# -------------------------
+# 2. Paths for dataset
+# -------------------------
+ROOT = r"N:\Datasets\LA"
+PROTOCOL_DIR = os.path.join(ROOT, "ASVspoof2019_LA_cm_protocols")
+
+SRC_DIRS = {
+    "train": os.path.join(ROOT, "ASVspoof2019_LA_train", "flac"),
+    "dev": os.path.join(ROOT, "ASVspoof2019_LA_dev", "flac"),
+    "eval": os.path.join(ROOT, "ASVspoof2019_LA_eval", "flac"),
+}
+
+DST_REAL = r"N:\Datasets\audio\raw\real"
+DST_FAKE = r"N:\Datasets\audio\raw\fake"
+
+os.makedirs(DST_REAL, exist_ok=True)
+os.makedirs(DST_FAKE, exist_ok=True)
+
+PROTOCOLS = {
+    "train": "ASVspoof2019.LA.cm.train.trn.txt",
+    "dev": "ASVspoof2019.LA.cm.dev.trl.txt",
+    "eval": "ASVspoof2019.LA.cm.eval.trl.txt",
+}
+
+# -------------------------
+# 3. Copy & convert
+# -------------------------
+def copy_and_convert(split, protocol_file):
+    src_dir = SRC_DIRS[split]
+    protocol_path = os.path.join(PROTOCOL_DIR, protocol_file)
+
+    print(f"\nProcessing {split} split using {protocol_file}")
+
+    with open(protocol_path, "r") as f:
+        lines = f.readlines()
+
+    real_count, fake_count = 0, 0
+    for line in lines:
+        parts = line.strip().split()
+        filename, label = parts[0], parts[-1]  # file ID, label
+
+        matches = glob.glob(os.path.join(src_dir, "**", filename + ".flac"), recursive=True)
+        if not matches:
+            continue
+        src = matches[0]
+
+        dst_dir = DST_REAL if label == "bonafide" else DST_FAKE
+        dst_wav = os.path.join(dst_dir, filename + ".wav")
+
+        if os.path.exists(dst_wav):
+            continue
+
+        try:
+            audio = AudioSegment.from_file(src, format="flac")
+            audio.export(dst_wav, format="wav")
+            if label == "bonafide":
+                real_count += 1
+            else:
+                fake_count += 1
+        except Exception as e:
+            print(f"❌ Error converting {src}: {e}")
+
+    print(f"✔ {split} done → {real_count} real, {fake_count} fake files converted")
+
+if __name__ == "__main__":
+    for split, proto_file in PROTOCOLS.items():
+        copy_and_convert(split, proto_file)
+
+    print("\n✅ All done! Files are in:")
+    print(f" - {DST_REAL}")
+    print(f" - {DST_FAKE}")
+
+
+# generate_report.py
+# Simple PDF report generator using fpdf
+
+from fpdf import FPDF
+from PIL import Image
+import os
+import tempfile
+
+class SimpleReport:
+    def __init__(self, out_path="report.pdf"):
+        self.pdf = FPDF()
+        self.out_path = out_path
+        self.pdf.set_auto_page_break(auto=True, margin=15)
+
+    def add_cover(self, title="RevealAI - Detection Report"):
+        self.pdf.add_page()
+        self.pdf.set_font("Arial", size=18)
+        self.pdf.cell(0, 10, title, ln=True, align='C')
+        self.pdf.ln(6)
+
+    def add_result(self, filename, video_score, audio_score, final_score, heatmaps=None, spec_img=None):
+        self.pdf.add_page()
+        self.pdf.set_font("Arial", size=12)
+        self.pdf.cell(0, 8, f"File: {filename}", ln=True)
+        self.pdf.cell(0, 8, f"Video fake score: {video_score:.3f}", ln=True)
+        self.pdf.cell(0, 8, f"Audio fake score: {audio_score:.3f}", ln=True)
+        self.pdf.cell(0, 8, f"Final combined score: {final_score:.3f}", ln=True)
+        self.pdf.ln(6)
+
+        # Add heatmaps (up to 4 per page nicely)
+        if heatmaps:
+            self.pdf.set_font("Arial", size=11)
+            self.pdf.cell(0, 6, "Video heatmaps:", ln=True)
+            for i, img_arr in enumerate(heatmaps):
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                Image.fromarray(img_arr.astype('uint8')).save(tmp.name)
+                # place two images per row
+                w = 90
+                x = (i % 2) * (w + 10) + 10
+                if i % 2 == 0:
+                    self.pdf.ln(2)
+                self.pdf.image(tmp.name, x=x, w=w)
+                tmp.close()
+
+        # Add spectrogram
+        if spec_img is not None:
+            self.pdf.add_page()
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            Image.fromarray(spec_img.astype('uint8')).save(tmp.name)
+            self.pdf.image(tmp.name, w=180)
+            tmp.close()
+
+    def output(self):
+        os.makedirs(os.path.dirname(self.out_path) or ".", exist_ok=True)
+        self.pdf.output(self.out_path)
+        return self.out_path
+
+
+
+# src/infer.py
+import os
+import numpy as np
+import tempfile
+import shutil # <--- FIX: Added for directory cleanup
+from tensorflow.keras.models import load_model
+from src.config import VIDEO_MODEL_PATH, AUDIO_MODEL_PATH, IMG_SIZE_VIDEO, IMG_SIZE_AUDIO
+from src.utils import extract_frames, load_images_to_array, preprocess_frames_for_xception, make_gradcam_heatmap, find_last_conv_layer, overlay_heatmap_on_image, audio_to_melspectrogram, spec_to_rgb_image
+
+# ... load_models function is unchanged ...
+_VIDEO_MODEL = None
+_AUDIO_MODEL = None
+
+def load_models(video_model_path=VIDEO_MODEL_PATH, audio_model_path=AUDIO_MODEL_PATH):
+    global _VIDEO_MODEL, _AUDIO_MODEL
+    if _VIDEO_MODEL is None and os.path.exists(video_model_path):
+        _VIDEO_MODEL = load_model(video_model_path)
+    if _AUDIO_MODEL is None and os.path.exists(audio_model_path):
+        _AUDIO_MODEL = load_model(audio_model_path)
+    return _VIDEO_MODEL, _AUDIO_MODEL
+
+def infer_video(video_path, every_n_frames=15, max_frames=20, heatmap_frames=3):
+    model, _ = load_models()
+    if model is None:
+        raise FileNotFoundError("Video model not found at path: " + VIDEO_MODEL_PATH)
+    
+    # FIX: Use try...finally to ensure cleanup
+    tmpdir = tempfile.mkdtemp(prefix="revealai_frames_")
+    try:
+        saved = extract_frames(video_path, tmpdir, every_n_frames=every_n_frames, max_frames=max_frames, resize=IMG_SIZE_VIDEO)
+        if saved == 0:
+            return {"video_score": 0.0, "heatmaps": []}
+
+        files = sorted([os.path.join(tmpdir, f) for f in os.listdir(tmpdir) if f.lower().endswith((".jpg",".png"))])
+        frames = load_images_to_array(files, target_size=IMG_SIZE_VIDEO)
+        X = preprocess_frames_for_xception(frames)
+
+        preds = model.predict(X, verbose=0)
+        fake_idx = 1 if preds.shape[1] > 1 else 0
+        fake_probs = preds[:, fake_idx]
+        avg_fake_prob = float(np.mean(fake_probs))
+
+        heatmaps = []
+        try:
+            last_conv = find_last_conv_layer(model)
+            for i in range(min(heatmap_frames, len(frames))):
+                img = X[i:i+1]
+                hm = make_gradcam_heatmap(img, model, last_conv, pred_index=fake_idx)
+                overlay = overlay_heatmap_on_image(frames[i].astype('uint8'), hm)
+                heatmaps.append(overlay)
+        except Exception as e:
+            print(f"⚠️ Could not generate heatmaps: {e}")
+        
+        return {"video_score": avg_fake_prob, "heatmaps": heatmaps}
+    finally:
+        # This will run whether the function succeeds or fails
+        shutil.rmtree(tmpdir)
+
+# ... infer_audio and combine_scores are unchanged ...
+def infer_audio(wav_path):
+    """
+    Returns {'audio_score': float, 'spec_img': np.uint8 image}
+    """
+    _, model = load_models()
+    if model is None:
+        raise FileNotFoundError("Audio model not found at path: " + AUDIO_MODEL_PATH)
+    spec = audio_to_melspectrogram(wav_path, duration=8.0)
+    if spec is None:
+        return {"audio_score": 0.0, "spec_img": None}
+    img = spec_to_rgb_image(spec, out_size=IMG_SIZE_AUDIO)
+    x = img.astype('float32') / 255.0
+    x = np.expand_dims(x, axis=0)
+    pred = model.predict(x)[0]
+    fake_idx = 1 if len(pred) > 1 else 0
+    fake_prob = float(pred[fake_idx])
+    return {"audio_score": fake_prob, "spec_img": img}
+
+def combine_scores(video_score, audio_score, video_weight=0.6, audio_weight=0.4):
+    """
+    Weighted average. If audio_score is None, return video_score.
+    """
+    if audio_score is None:
+        return video_score
+    return float(video_score * video_weight + audio_score * audio_weight)
+
+
+# src/make_split.py
+# Create train/val/test splits for both audio and video datasets.
+# Expects:
+#   N:\Datasets\data\audio\specs\real, N:\Datasets\data\audio\specs\fake   (spectrograms)
+#   N:\Datasets\data\video\frames\real, N:\Datasets\data\video\frames\fake (frames)
+# It will generate text files listing file paths with numeric labels.
+
+import os
+import random
+from glob import glob
+from src.config import AUDIO_SPECS, VIDEO_FRAMES, SPLITS_DIR
+
+os.makedirs(SPLITS_DIR, exist_ok=True)
+
+def write_split(items, out_file):
+    with open(out_file, "w") as f:
+        for path, label in items:
+            f.write(f"{path} {label}\n")
+    print(f"✔ Wrote {len(items)} items → {out_file}")
+
+def make_splits(data_dir, exts, prefix):
+    if not os.path.exists(data_dir):
+        print(f"❌ Missing directory: {data_dir}")
+        return
+
+    items = []
+    for label, lbl_num in (("real", 0), ("fake", 1)):
+        subdir = os.path.join(data_dir, label)
+        if not os.path.exists(subdir):
+            print(f"⚠️ Skipping missing folder: {subdir}")
+            continue
+        for ext in exts:
+            files = glob(os.path.join(subdir, f"**/*{ext}"), recursive=True)
+            for f in files:
+                items.append((f, lbl_num))
+
+    if not items:
+        print(f"⚠️ No files found in {data_dir}")
+        return
+
+    random.shuffle(items)
+    n = len(items)
+    n_train = int(0.7 * n)
+    n_val   = int(0.15 * n)
+
+    train_items = items[:n_train]
+    val_items   = items[n_train:n_train+n_val]
+    test_items  = items[n_train+n_val:]
+
+    write_split(train_items, os.path.join(SPLITS_DIR, f"{prefix}_train.txt"))
+    write_split(val_items, os.path.join(SPLITS_DIR, f"{prefix}_val.txt"))
+    write_split(test_items, os.path.join(SPLITS_DIR, f"{prefix}_test.txt"))
+
+def main():
+    print(">> Creating splits...")
+    make_splits(AUDIO_SPECS, [".png"], "audio")           # spectrograms
+    make_splits(VIDEO_FRAMES, [".jpg", ".png"], "video")  # frames
+    print("\n✅ All splits created in:", SPLITS_DIR)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+# src/prepare_audio.py
+# Convert raw .wav audio → spectrogram PNGs
+
+import os
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+import numpy as np  # <--- FIX: Added missing import
+from pathlib import Path
+from src.config import AUDIO_RAW, AUDIO_SPECS
+
+os.makedirs(os.path.join(AUDIO_SPECS, "real"), exist_ok=True)
+os.makedirs(os.path.join(AUDIO_SPECS, "fake"), exist_ok=True)
+
+def wav_to_spec(in_path, out_path):
+    try:
+        y, sr = librosa.load(in_path, sr=None)
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        S_db = librosa.power_to_db(S, ref=np.max)
+
+        plt.figure(figsize=(3,3))
+        librosa.display.specshow(S_db, sr=sr, cmap="magma")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(out_path, bbox_inches="tight", pad_inches=0)
+        plt.close()
+    except Exception as e:
+        print(f"❌ Failed {in_path}: {e}")
+
+def process_folder(label):
+    in_dir = os.path.join(AUDIO_RAW, label)
+    out_dir = os.path.join(AUDIO_SPECS, label)
+    print(f"Processing {len(os.listdir(in_dir))} files in {in_dir}...")
+    for fname in os.listdir(in_dir):
+        if not fname.endswith(".wav"):
+            continue
+        in_path = os.path.join(in_dir, fname)
+        out_path = os.path.join(out_dir, Path(fname).stem + ".png")
+        if os.path.exists(out_path):
+            continue
+        wav_to_spec(in_path, out_path)
+
+if __name__ == "__main__":
+    for lbl in ["real", "fake"]:
+        print(f">> Processing {lbl} audio...")
+        process_folder(lbl)
+    print("\n✅ All spectrograms saved in:", AUDIO_SPECS)
+
+
+# src/prepare_video.py
+# Extract frames from videos (mp4) → JPGs
+
+import os
+import cv2
+from pathlib import Path
+from tqdm import tqdm  # <--- 1. Import tqdm
+from src.config import VIDEO_RAW, VIDEO_FRAMES
+
+os.makedirs(os.path.join(VIDEO_FRAMES, "real"), exist_ok=True)
+os.makedirs(os.path.join(VIDEO_FRAMES, "fake"), exist_ok=True)
+
+def extract_frames(in_path, out_dir, every_n=30, max_frames=30):
+    # This function remains unchanged
+    cap = cv2.VideoCapture(in_path)
+    count, saved = 0, 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if count % every_n == 0:
+            out_path = os.path.join(out_dir, f"{Path(in_path).stem}_{saved}.jpg")
+            cv2.imwrite(out_path, frame)
+            saved += 1
+            if saved >= max_frames:
+                break
+        count += 1
+    cap.release()
+
+def process_videos(label):
+    in_dir = os.path.join(VIDEO_RAW, label)
+    out_dir = os.path.join(VIDEO_FRAMES, label)
+    
+    # --- 2. Get a list of files to process ---
+    video_files = [f for f in os.listdir(in_dir) if f.endswith(".mp4")]
+    
+    # --- 3. Wrap the file list with tqdm for a progress bar ---
+    for fname in tqdm(video_files, desc=f"Processing {label} videos"):
+        in_path = os.path.join(in_dir, fname)
+        extract_frames(in_path, out_dir)
+
+if __name__ == "__main__":
+    for lbl in ["real", "fake"]:
+        # The old print statement was removed as tqdm handles the description now
+        process_videos(lbl)
+    print("\n✅ All frames saved in:", VIDEO_FRAMES)
+
+
+tensorflow>=2.12
+opencv-python
+librosa
+matplotlib
+numpy
+pandas
+scikit-learn
+streamlit
+fpdf2
+pillow
+tqdm
+tf-keras-vis
+pydub
+requests
+zipfile36
+
+
+
+# src/sort_asvspoof.py
+import os
+import shutil
+import glob
+import requests
+import zipfile
+from pathlib import Path
+from pydub import AudioSegment
+
+# ... Paths and other constants are unchanged ...
+# 1. Ensure ffmpeg exists
+FFMPEG_DIR = Path("C:/ffmpeg/bin")
+FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
+
+if not FFMPEG_EXE.exists():
+    print("⚡ ffmpeg not found, downloading...")
+    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    zip_path = Path("ffmpeg.zip")
+
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(r.raw, f)
+
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall("C:/")
+    
+    # FIX: More robust renaming logic
+    try:
+        # Find the extracted folder (e.g., ffmpeg-6.x-essentials_build)
+        extracted_dir = next(Path("C:/").glob("ffmpeg-*"))
+        target_dir = Path("C:/ffmpeg")
+        if not target_dir.exists():
+            extracted_dir.rename(target_dir)
+            print("✅ ffmpeg installed at C:/ffmpeg/bin")
+        else:
+            print("ℹ️ ffmpeg directory already exists. Assuming it's installed.")
+    except StopIteration:
+        print("❌ Could not find the extracted ffmpeg folder.")
+    finally:
+        if zip_path.exists():
+            zip_path.unlink() # Clean up downloaded zip
+
+# Force pydub to use this ffmpeg
+AudioSegment.converter = str(FFMPEG_EXE)
+
+# ... The rest of the script is unchanged ...
+ROOT = r"N:\Datasets\LA"
+PROTOCOL_DIR = os.path.join(ROOT, "ASVspoof2019_LA_cm_protocols")
+SRC_DIRS = {
+    "train": os.path.join(ROOT, "ASVspoof2019_LA_train", "flac"),
+    "dev": os.path.join(ROOT, "ASVspoof2019_LA_dev", "flac"),
+    "eval": os.path.join(ROOT, "ASVspoof2019_LA_eval", "flac"),
+}
+DST_REAL = r"N:\Datasets\audio\raw\real"
+DST_FAKE = r"N:\Datasets\audio\raw\fake"
+PROTOCOLS = {
+    "train": "ASVspoof2019.LA.cm.train.trn.txt",
+    "dev": "ASVspoof201 miscellaneousLA.cm.dev.trl.txt",
+    "eval": "ASVspoof2019.LA.cm.eval.trl.txt",
+}
+
+def copy_and_convert(split, protocol_file):
+    # ... function implementation is unchanged ...
+    pass 
+
+if __name__ == "__main__":
+    # ... main execution block is unchanged ...
+    pass
+
+
+# src/train_audio.py
+# Train CNN on spectrogram images using predefined splits (.txt files)
+
+import os
+import numpy as np
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPool2D, Flatten, Dense, Dropout, BatchNormalization
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
+from tqdm.keras import TqdmCallback # <--- 1. Import TqdmCallback for training
+
+from src.config import AUDIO_MODEL_PATH, MODELS_DIR, IMG_SIZE_AUDIO, SPLITS_DIR
+
+BATCH_SIZE = 16
+EPOCHS = 12
+
+def build_audio_model(input_shape=(224,224,3), num_classes=2):
+    # This function is unchanged
+    model = Sequential([
+        Conv2D(32, (3,3), activation='relu', input_shape=input_shape),
+        BatchNormalization(), MaxPool2D(),
+        Conv2D(64, (3,3), activation='relu'),
+        BatchNormalization(), MaxPool2D(),
+        Conv2D(128, (3,3), activation='relu'),
+        BatchNormalization(), MaxPool2D(),
+        Flatten(),
+        Dropout(0.4),
+        Dense(128, activation='relu'),
+        Dense(num_classes, activation='softmax')
+    ])
+    model.compile(optimizer=Adam(1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+def load_split(split_file):
+    # This function is unchanged
+    items = []
+    with open(split_file, "r") as f:
+        for line in f:
+            path, label = line.strip().split()
+            label = 0 if label.lower() in ["real", "bonafide", "0"] else 1
+            items.append((path, label))
+    return items
+
+def make_generator(items, target_size, batch_size, shuffle=True):
+    # This function is unchanged
+    n = len(items)
+    while True:
+        if shuffle:
+            np.random.shuffle(items)
+        for i in range(0, n, batch_size):
+            batch = items[i:i+batch_size]
+            X, y = [], []
+            for path, label in batch:
+                img = load_img(path, target_size=target_size)
+                img_arr = img_to_array(img)
+                X.append(img_arr / 255.0)
+                onehot = np.zeros(2)
+                onehot[label] = 1
+                y.append(onehot)
+            yield np.array(X), np.array(y)
+
+def main():
+    train_items = load_split(os.path.join(SPLITS_DIR, "audio_train.txt"))
+    val_items   = load_split(os.path.join(SPLITS_DIR, "audio_val.txt"))
+    test_items  = load_split(os.path.join(SPLITS_DIR, "audio_test.txt"))
+
+    train_gen = make_generator(train_items, IMG_SIZE_AUDIO, BATCH_SIZE, shuffle=True)
+    val_gen   = make_generator(val_items, IMG_SIZE_AUDIO, BATCH_SIZE, shuffle=False)
+    test_gen  = make_generator(test_items, IMG_SIZE_AUDIO, BATCH_SIZE, shuffle=False)
+    
+    steps_train = len(train_items) // BATCH_SIZE
+    steps_val   = len(val_items) // BATCH_SIZE
+    steps_test  = len(test_items) // BATCH_SIZE
+
+    model = build_audio_model(input_shape=(IMG_SIZE_AUDIO[0], IMG_SIZE_AUDIO[1], 3))
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
+    chk = ModelCheckpoint(AUDIO_MODEL_PATH, monitor='val_accuracy', save_best_only=True, verbose=0) # Set verbose=0 to avoid duplicate output
+    rlr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, verbose=1)
+
+    # --- 2. Add TqdmCallback to the list of callbacks for the training loop ---
+    model.fit(train_gen,
+              validation_data=val_gen,
+              steps_per_epoch=steps_train,
+              validation_steps=steps_val,
+              epochs=EPOCHS,
+              callbacks=[chk, rlr, TqdmCallback(verbose=2)],
+              verbose=0) # Set verbose=0 to let TqdmCallback handle the output
+
+    print("\n✅ Training finished. Best model saved to:", AUDIO_MODEL_PATH)
+
+    print("\n🔎 Evaluating on test set...")
+    # --- 3. Use verbose=1 in model.evaluate to show a built-in progress bar ---
+    loss, acc = model.evaluate(test_gen, steps=steps_test, verbose=1)
+    print(f"\nTest accuracy: {acc:.4f}")
+
+if __name__ == "__main__":
+    main()
+
+
+# src/train_video.py
+# Fine-tune Xception on frames using predefined splits (.txt files)
+
+import os
+import numpy as np
+from tensorflow.keras.applications import Xception
+from tensorflow.keras.layers import Dropout, Dense
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
+from tqdm.keras import TqdmCallback
+from tqdm import tqdm
+
+from src.config import VIDEO_MODEL_PATH, MODELS_DIR, IMG_SIZE_VIDEO, SPLITS_DIR
+from src.utils import preprocess_frames_for_xception
+
+BATCH_SIZE = 8
+EPOCHS = 6
+
+def build_model(num_classes=2, lr=1e-4):
+    base = Xception(weights='imagenet', include_top=False, pooling='avg',
+                    input_shape=(IMG_SIZE_VIDEO[0], IMG_SIZE_VIDEO[1], 3))
+    x = base.output
+    x = Dropout(0.3)(x)
+    preds = Dense(num_classes, activation='softmax')(x)
+    model = Model(inputs=base.input, outputs=preds)
+
+    for layer in base.layers[:-50]:
+        layer.trainable = False
+    for layer in base.layers[-50:]:
+        layer.trainable = True
+
+    model.compile(optimizer=Adam(lr), loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+def load_split(split_file):
+    items = []
+    with open(split_file, "r") as f:
+        for line in f:
+            path, label = line.strip().split()
+            label = 0 if label.lower() in ["real", "bonafide", "0"] else 1
+            items.append((path, label))
+    return items
+
+def make_generator(items, target_size, batch_size, shuffle=True):
+    n = len(items)
+    while True:
+        if shuffle:
+            np.random.shuffle(items)
+        for i in range(0, n, batch_size):
+            batch_items = items[i:i+batch_size]
+            X, y = [], []
+            for path, label in batch_items:
+                img = load_img(path, target_size=target_size)
+                img_arr = img_to_array(img)
+                X.append(img_arr)
+                onehot = np.zeros(2)
+                onehot[label] = 1
+                y.append(onehot)
+            X_processed = preprocess_frames_for_xception(np.array(X))
+            yield X_processed, np.array(y)
+
+def main():
+    train_items = load_split(os.path.join(SPLITS_DIR, "video_train.txt"))
+    val_items   = load_split(os.path.join(SPLITS_DIR, "video_val.txt"))
+    test_items  = load_split(os.path.join(SPLITS_DIR, "video_test.txt"))
+
+    train_gen = make_generator(train_items, IMG_SIZE_VIDEO, BATCH_SIZE, shuffle=True)
+    val_gen   = make_generator(val_items, IMG_SIZE_VIDEO, BATCH_SIZE, shuffle=False)
+    test_gen  = make_generator(test_items, IMG_SIZE_VIDEO, BATCH_SIZE, shuffle=False)
+    
+    steps_train = len(train_items) // BATCH_SIZE
+    steps_val   = len(val_items) // BATCH_SIZE
+    steps_test  = len(test_items) // BATCH_SIZE
+
+    model = build_model()
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
+    chk = ModelCheckpoint(VIDEO_MODEL_PATH, monitor='val_accuracy', save_best_only=True, verbose=1)
+    rlr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, verbose=1)
+
+    # Training with tqdm progress bar
+    model.fit(train_gen,
+              validation_data=val_gen,
+              steps_per_epoch=steps_train,
+              validation_steps=steps_val,
+              epochs=EPOCHS,
+              callbacks=[chk, rlr, TqdmCallback(verbose=1)])
+
+    print("✅ Training finished. Best model saved to:", VIDEO_MODEL_PATH)
+
+    print("\n🔎 Evaluating on test set...")
+    for _ in tqdm(range(steps_test), desc="Testing", unit="batch"):
+        next(test_gen)
+    loss, acc = model.evaluate(test_gen, steps=steps_test, verbose=0)
+    print(f"Test accuracy: {acc:.4f}")
+
+if __name__ == "__main__":
+    main()
+
+
+# utils.py
+# Helper functions: frame extraction, spectrogram conversion, Grad-CAM utilities, small I/O helpers.
+# Compatible with TF 2.x (tested with TF 2.19 on Colab).
+
+import os
+import cv2
+import numpy as np
+import librosa
+from PIL import Image
+import tensorflow as tf
+from tensorflow.keras.applications.xception import preprocess_input as xception_preprocess
+import io
+import matplotlib.cm as cm
+
+# --------------------------
+# Video: frame extraction
+# --------------------------
+def extract_frames(video_path, out_dir, every_n_frames=10, max_frames=50, resize=(299, 299)):
+    """
+    Extract frames from a video and save as JPEGs into out_dir.
+    - every_n_frames: sample every Nth frame (reduces total frames)
+    - max_frames: stop after saving this many frames
+    - resize: target size (W,H) for saved frames
+    Returns number of frames saved.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return 0
+    idx = 0
+    saved = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if idx % every_n_frames == 0:
+            # convert BGR->RGB and resize
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_resized = cv2.resize(frame_rgb, resize)
+            fname = f"{os.path.splitext(os.path.basename(video_path))[0]}_f{saved}.jpg"
+            out_path = os.path.join(out_dir, fname)
+            Image.fromarray(frame_resized).save(out_path, format="JPEG")
+            saved += 1
+            if saved >= max_frames:
+                break
+        idx += 1
+    cap.release()
+    return saved
+
+def load_image_paths(folder, exts=(".jpg", ".png")):
+    files = [os.path.join(folder, f) for f in sorted(os.listdir(folder))
+             if f.lower().endswith(exts)]
+    return files
+
+def load_images_to_array(file_list, target_size=(299,299)):
+    """
+    Returns numpy array shape (N,H,W,3) dtype float32 (not preprocessed)
+    """
+    arr = []
+    for f in file_list:
+        img = Image.open(f).convert("RGB").resize(target_size)
+        arr.append(np.array(img))
+    if len(arr) == 0:
+        return np.zeros((0, target_size[0], target_size[1], 3), dtype=np.float32)
+    return np.array(arr, dtype=np.float32)
+
+# --------------------------
+# Preprocess for Xception
+# --------------------------
+def preprocess_frames_for_xception(frames):
+    """frames: numpy array (N,H,W,3) dtype float32"""
+    return xception_preprocess(frames)  # scales to [-1,1] expected by Xception
+
+# --------------------------
+# Audio: mel spectrogram
+# --------------------------
+def audio_to_melspectrogram(wav_path, sr=16000, n_mels=128, hop_length=512, n_fft=2048, duration=8.0):
+    """
+    Load audio and return log-mel spectrogram (n_mels x time) in dB.
+    duration: seconds to load (trim long files for speed)
+    """
+    y, sr = librosa.load(wav_path, sr=sr, duration=duration)
+    if y is None or len(y) == 0:
+        return None
+    S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels, hop_length=hop_length, n_fft=n_fft)
+    S_db = librosa.power_to_db(S, ref=np.max)
+    return S_db
+
+def spec_to_rgb_image(spec, out_size=(224,224)):
+    """
+    Convert single-channel spectrogram (2D) to 3-channel uint8 image
+    suitable as input to a CNN expecting RGB images.
+    """
+    s = spec - np.min(spec)
+    s = s / (np.max(s) + 1e-8)
+    s = (s * 255).astype(np.uint8)
+    img = Image.fromarray(s)
+    img = img.convert("RGB").resize(out_size)
+    return np.array(img)
+
+# --------------------------
+# Grad-CAM (TF Keras)
+# --------------------------
+def find_last_conv_layer(model):
+    """
+    Try to find the last conv layer name in a Keras model.
+    """
+    for layer in reversed(model.layers):
+        if isinstance(layer, tf.keras.layers.Conv2D) or 'conv' in layer.name or 'sepconv' in layer.name:
+            return layer.name
+    raise ValueError("No convolutional layer found in the model")
+
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    """
+    img_array: preprocessed image array (1,H,W,3)
+    model: tf.keras.Model
+    last_conv_layer_name: string
+    pred_index: class index to compute Grad-CAM for (None uses argmax)
+    returns: heatmap HxW normalized 0-1
+    """
+    grad_model = tf.keras.models.Model([model.inputs], [model.get_layer(last_conv_layer_name).output, model.output])
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(img_array)
+        if pred_index is None:
+            pred_index = tf.argmax(predictions[0])
+        loss = predictions[:, pred_index]
+    grads = tape.gradient(loss, conv_outputs)
+    # compute channel-wise mean of gradients
+    pooled_grads = tf.reduce_mean(grads, axis=(0,1,2))
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
+    heatmap = heatmap.numpy()
+    return heatmap
+
+def overlay_heatmap_on_image(img_rgb, heatmap, alpha=0.4, cmap='jet'):
+    """
+    img_rgb: HxWx3 uint8
+    heatmap: small 2D float array 0..1
+    returns overlayed uint8 image
+    """
+    import cv2
+    heatmap_resized = cv2.resize(heatmap, (img_rgb.shape[1], img_rgb.shape[0]))
+    colormap = cm.get_cmap(cmap)
+    heatmap_color = colormap(heatmap_resized)
+    heatmap_color = (heatmap_color[:, :, :3] * 255).astype(np.uint8)
+    overlay = cv2.addWeighted(img_rgb.astype(np.uint8), 1-alpha, heatmap_color.astype(np.uint8), alpha, 0)
+    return overlay
+
+# --------------------------
+# Small helper: save numpy array to PNG bytes
+# --------------------------
+def array_to_png_bytes(arr):
+    img = Image.fromarray(arr.astype('uint8'))
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf.getvalue()
+
+
+
+
