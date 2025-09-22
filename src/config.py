@@ -6,22 +6,29 @@ import os
 # --- Environment Detection ---
 # This block automatically switches paths based on where the code is running.
 if "COLAB_GPU" in os.environ:
-    # This path is used when running on Google Colab.
-    # CORRECTED to match your Google Drive screenshot.
-    ROOT = "/content/drive/MyDrive/revealai/datasets" 
+    # --- Colab Paths ---
+    # Path to the main project folder on Google Drive
+    PROJECT_ROOT = "/content/drive/MyDrive/revealai"
+    # Path to the nested folder containing your datasets
+    DATA_ROOT = os.path.join(PROJECT_ROOT, "datasets")
 else:
-    # This path is used when running on your local computer.
-    ROOT = r"N:\Datasets"
+    # --- Local PC Paths ---
+    # On your local machine, everything is under one root folder
+    PROJECT_ROOT = r"N:\Datasets"
+    DATA_ROOT = r"N:\Datasets"
 
-# --- Main Data Directories ---
-# These folders contain your raw data, processed data, and results.
-VIDEO_RAW = os.path.join(ROOT, "video", "raw")
-AUDIO_RAW = os.path.join(ROOT, "audio", "raw")
-VIDEO_FRAMES = os.path.join(ROOT, "video", "frames")
-AUDIO_SPECS = os.path.join(ROOT, "audio", "specs")
-SPLITS_DIR = os.path.join(ROOT, "splits")
-MODELS_DIR = os.path.join(ROOT, "models")
-REPORTS_DIR = os.path.join(ROOT, "reports")
+# --- Data Directories (using DATA_ROOT) ---
+# These paths point to your audio, video, and splits folders.
+VIDEO_RAW = os.path.join(DATA_ROOT, "video", "raw")
+AUDIO_RAW = os.path.join(DATA_ROOT, "audio", "raw")
+VIDEO_FRAMES = os.path.join(DATA_ROOT, "video", "frames")
+AUDIO_SPECS = os.path.join(DATA_ROOT, "audio", "specs")
+SPLITS_DIR = os.path.join(DATA_ROOT, "splits")
+
+# --- Asset Directories (using PROJECT_ROOT) ---
+# These paths point to where models and reports will be saved.
+MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 
 # --- Model Paths ---
 # These are the final output paths for your trained models.
